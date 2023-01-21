@@ -1,3 +1,7 @@
+object Person {
+	age: i64
+}
+
 fn fib(n: i64) -> i64 {
 	if(0 == n){
 		0;
@@ -13,9 +17,11 @@ fn fib(n: i64) -> i64 {
 }
 
 fn main() -> i64 {
+	let a: i64 = 6;
+
+	print(a);
 	print("fib(", 5, ") = ", fib(5));
 	print("fib(", 10, ") = ", fib(10));
 	print("fib(", 15, ") = ", fib(15));
 	print("fib(", 20, ") = ", fib(20));
-	print("fib(", 25, ") = ", fib(25));
 }

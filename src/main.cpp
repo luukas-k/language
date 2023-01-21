@@ -21,7 +21,8 @@ enum struct ast_node_type {
 	assign,
 	symbol,
 	conditional,
-	comparison
+	comparison,
+	object_type
 };
 
 struct ast_node;
@@ -56,7 +57,7 @@ struct assign {
 };
 
 struct initialize {
-	std::string symbol;
+	argument_decl symbol;
 	ast_node* value;
 };
 
@@ -91,6 +92,11 @@ struct function {
 	ast_node* lambda;
 };
 
+struct object_type {
+	std::string name;
+	std::vector<argument_decl> members;
+};
+
 struct ast_node {
 	ast_node_type type;
 
@@ -107,6 +113,7 @@ struct ast_node {
 	if_node as_if;
 	comparison as_comparison;
 	std::string as_string;
+	object_type as_object_type;
 };
 
 ast_node* make_number(i64 v) {
@@ -171,7 +178,7 @@ ast_node* make_assign(const std::string& sym, ast_node* v) {
 	};
 }
 
-ast_node* make_initialize(const std::string& sym, ast_node* v) {
+ast_node* make_initialize(argument_decl sym, ast_node* v) {
 	return new ast_node{
 		.type = ast_node_type::initialize,
 		.as_initialize = {
@@ -220,6 +227,16 @@ ast_node* make_function(const std::string& symbol, ast_node* lambda) {
 	};
 }
 
+ast_node* make_object_type(const std::string& name, const std::vector<argument_decl>& members) {
+	return new ast_node{
+		.type = ast_node_type::object_type,
+		.as_object_type = {
+			.name = name,
+			.members = members
+		}
+	};
+}
+
 struct parse_context {
 	std::string src;
 	i64 offset;
@@ -236,7 +253,7 @@ bool is_ws(char c) {
 		c == '\n' ||
 		c == '\r';
 }
-char to_lower(char c) { return (c >= 'A' && c <= 'Z') ? (c - ('a' - 'A')) : c; }
+char to_lower(char c) { return (c >= 'A' && c <= 'Z') ? (c + ('a' - 'A')) : c; }
 bool is_in_alphabet(char c) { c = to_lower(c); return c >= 'a' && c <= 'z'; }
 void ignore_ws(parse_context& ctx) {
 	while (is_ws(ctx.peek())) {
@@ -535,6 +552,8 @@ ast_node* parse_assign(parse_context& ctx) {
 	return make_assign(*lhs, rhs);
 }
 
+std::optional<argument_decl> parse_argument_decl(parse_context& ctx);
+
 ast_node* parse_initialize(parse_context& ctx) {
 	i64 off = ctx.offset;
 
@@ -546,7 +565,7 @@ ast_node* parse_initialize(parse_context& ctx) {
 	}
 
 	ignore_ws(ctx);
-	auto lhs = parse_symbol(ctx);
+	auto lhs = parse_argument_decl(ctx);
 	if (!lhs) {
 		ctx.offset = off;
 		return nullptr;
@@ -566,7 +585,7 @@ ast_node* parse_initialize(parse_context& ctx) {
 		return nullptr;
 	}
 
-	return make_assign(*lhs, rhs);
+	return make_initialize(*lhs, rhs);
 }
 
 ast_node* parse_comparison(parse_context& ctx) {
@@ -867,22 +886,71 @@ ast_node* parse_function(parse_context& ctx) {
 
 struct library {
 	std::vector<ast_node*> functions;
+	std::vector<ast_node*> object_types;
 };
+
+ast_node* parse_object_type(parse_context& ctx) {
+	i64 off = ctx.offset;
+
+	if (!parse_literal(ctx, "object")) {
+		ctx.offset = off;
+		return nullptr;
+	}
+
+	ignore_ws(ctx);
+	auto sym = parse_symbol(ctx);
+	if (!sym) {
+		ctx.offset = off;
+		return nullptr;
+	}
+	
+	ignore_ws(ctx);
+	if (!parse_literal(ctx, "{")) {
+		ctx.offset = off;
+		return nullptr;
+	}
+
+	std::vector<argument_decl> members;
+	do {
+		ignore_ws(ctx);
+		auto member = parse_argument_decl(ctx);
+		if (member) {
+			members.push_back(*member);
+		}
+		else {
+			break;
+		}
+	} while(true);
+
+	
+	ignore_ws(ctx);
+	if(!parse_literal(ctx, "}")){
+		ctx.offset = off;
+		return nullptr;
+	}
+
+	return make_object_type(*sym, members);
+}
 
 library parse_library(parse_context& ctx) {
 	std::vector<ast_node*> functions;
+	std::vector<ast_node*> object_types;
 	do {
 		ignore_ws(ctx);
 		ast_node* n = nullptr;
 		if (n = parse_function(ctx)) {
 			functions.push_back(n);
 		}
+		else if (n = parse_object_type(ctx)) {
+			object_types.push_back(n);
+		}
 		else {
 			break;
 		}
 	} while(true);
 	return library {
-		.functions = functions
+		.functions = functions,
+		.object_types = object_types
 	};
 }
 
@@ -914,6 +982,7 @@ struct eval_scope {
 };
 
 struct eval_context {
+	const library* ast;
 	value ret_value;
 	std::vector<eval_scope> scopes;
 	std::vector<std::pair<std::string, std::function<void(eval_context&, std::vector<value> args)>>> internal_functions;
@@ -1116,8 +1185,9 @@ i64 evaluate(eval_context& ctx, ast_node* v) {
 		}
 		case ast_node_type::initialize:
 		{
-			evaluate(ctx, v->as_assign.value);
-			init_value(ctx, v->as_assign.symbol, ctx.ret_value);
+			evaluate(ctx, v->as_initialize.value);
+			assert(v->as_initialize.symbol.type.value_or(get_value_type(ctx.ret_value)) == get_value_type(ctx.ret_value));
+			init_value(ctx, v->as_initialize.symbol.name, ctx.ret_value);
 			return 0;
 		}
 		case ast_node_type::symbol:
@@ -1195,6 +1265,7 @@ void register_internal_function(eval_context& ctx, const std::string& name, std:
 
 i64 evaluate(const library& lib) {
 	eval_context ctx{};
+	ctx.ast = &lib;
 
 	register_internal_function(ctx, "print", [](eval_context& ctx, std::vector<value> vals) {
 		bool first = true;
