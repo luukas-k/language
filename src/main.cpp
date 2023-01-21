@@ -888,7 +888,10 @@ library parse_library(parse_context& ctx) {
 
 library parse_ast(const std::string& src) {
 	parse_context ctx{ src, 0 };
-	return parse_library(ctx);
+	library lib = parse_library(ctx);
+	ignore_ws(ctx);
+	assert(ctx.offset == ctx.src.size()); // need to consume everything
+	return lib;
 }
 
 enum struct value_type {
@@ -1226,8 +1229,10 @@ i64 evaluate(const library& lib) {
 	for (auto& fn : lib.functions) {
 		evaluate(ctx, fn);
 	}
+
 	evaluate(ctx, find_function(ctx, "main")->scope);
 	assert(ctx.ret_value.type == value_type::i64);
+
 	return ctx.ret_value.as_i64;
 }
 

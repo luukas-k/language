@@ -17,5 +17,5 @@ fn main() -> i64 {
 	print("fib(", 10, ") = ", fib(10));
 	print("fib(", 15, ") = ", fib(15));
 	print("fib(", 20, ") = ", fib(20));
-	print("fib(", 30, ") = ", fib(30));
+	print("fib(", 25, ") = ", fib(25));
 }
