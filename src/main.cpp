@@ -4,15 +4,18 @@
 #include <vector>
 #include <assert.h>
 #include <fstream>
+#include <functional>
 
 using i64 = int64_t;
 
 enum struct ast_node_type {
 	unknown = 0,
 	number,
+	string,
 	bin_op,
 	sequence,
 	call,
+	lambda,
 	function,
 	initialize,
 	assign,
@@ -42,7 +45,7 @@ struct argument_decl {
 	std::optional<std::string> type;
 };
 
-struct function {
+struct lambda {
 	ast_node* scope;
 	std::vector<argument_decl> args;
 };
@@ -83,6 +86,11 @@ struct comparison {
 	ast_node* rhs;
 };
 
+struct function {
+	std::string symbol;
+	ast_node* lambda;
+};
+
 struct ast_node {
 	ast_node_type type;
 
@@ -90,6 +98,7 @@ struct ast_node {
 	bin_op as_bin_op;
 	std::vector<ast_node*> as_sequence;
 	call as_call;
+	lambda as_lambda;
 	function as_function;
 	assign as_assign;
 	std::string as_symbol;
@@ -97,12 +106,20 @@ struct ast_node {
 	argument_decl as_argument_decl;
 	if_node as_if;
 	comparison as_comparison;
+	std::string as_string;
 };
 
 ast_node* make_number(i64 v) {
 	return new ast_node{
 		.type = ast_node_type::number,
 		.as_number = { v }
+	};
+}
+
+ast_node* make_string(const std::string& val) {
+	return new ast_node{
+		.type = ast_node_type::string,
+		.as_string = val
 	};
 }
 
@@ -134,10 +151,10 @@ ast_node* make_call(const std::string& name, std::vector<ast_node*> nodes) {
 	};
 }
 
-ast_node* make_function(ast_node* scope, const std::vector<argument_decl>& args) {
+ast_node* make_lambda(ast_node* scope, const std::vector<argument_decl>& args) {
 	return new ast_node{
-		.type = ast_node_type::function,
-		.as_function = {
+		.type = ast_node_type::lambda,
+		.as_lambda = {
 			.scope = scope,
 			.args = args
 		}
@@ -193,6 +210,16 @@ ast_node* make_comparison(ast_node* lhs, ast_node* rhs, comparison_type t) {
 	};
 }
 
+ast_node* make_function(const std::string& symbol, ast_node* lambda) {
+	return new ast_node{
+		.type = ast_node_type::function,
+		.as_function = {
+			.symbol = symbol,
+			.lambda = lambda
+		}
+	};
+}
+
 struct parse_context {
 	std::string src;
 	i64 offset;
@@ -234,6 +261,24 @@ ast_node* parse_number(parse_context& ctx) {
 	return nullptr;
 }
 
+ast_node* parse_string(parse_context& ctx) {
+	i64 off = ctx.offset;
+
+	ignore_ws(ctx);
+	if (ctx.peek() == '\"') {
+		ctx.get(); // "
+		std::string tmp;
+		while (ctx.peek() != '\"') {
+			tmp.push_back(ctx.get());
+		}
+		ctx.get(); // "
+		return make_string(tmp);
+	}
+
+	ctx.offset = off;
+	return nullptr;
+}
+
 bool parse_literal(parse_context& ctx, const std::string& v) {
 	i64 off = ctx.offset;
 	ignore_ws(ctx);
@@ -248,7 +293,7 @@ bool parse_literal(parse_context& ctx, const std::string& v) {
 }
 
 std::optional<std::string> parse_symbol(parse_context& ctx);
-ast_node* parse_function(parse_context& ctx);
+ast_node* parse_lambda(parse_context& ctx);
 ast_node* parse_expr(parse_context& ctx);
 ast_node* parse_scope(parse_context& ctx);
 ast_node* parse_call(parse_context& ctx);
@@ -561,7 +606,7 @@ ast_node* parse_expr(parse_context& ctx) {
 	ast_node* assign = parse_assign(ctx);
 	if (assign) return assign;
 
-	ast_node* func = parse_function(ctx);
+	ast_node* func = parse_lambda(ctx);
 	if (func) return func;
 
 	ast_node* mul = parse_mul(ctx);
@@ -584,6 +629,9 @@ ast_node* parse_expr(parse_context& ctx) {
 
 	ast_node* num = parse_number(ctx);
 	if (num) return num;
+
+	ast_node* str = parse_string(ctx);
+	if(str) return str;
 
 	auto sym = parse_symbol(ctx);
 	if (sym) return make_symbol(*sym);
@@ -739,7 +787,7 @@ std::optional<argument_decl> parse_argument_decl(parse_context& ctx) {
 	};
 }
 
-ast_node* parse_function(parse_context& ctx) {
+ast_node* parse_lambda(parse_context& ctx) {
 	i64 off = ctx.offset;
 
 	ignore_ws(ctx);
@@ -778,19 +826,75 @@ ast_node* parse_function(parse_context& ctx) {
 	bool arrow = parse_literal(ctx, "->");
 
 	ignore_ws(ctx);
+	auto rtype = parse_symbol(ctx);
+
+	ignore_ws(ctx);
 	auto scope = parse_scope(ctx);
 
 	if (o_paren && c_paren && arrow && scope) {
-		return make_function(scope, arg_names);
+		return make_lambda(scope, arg_names);
 	}
 
 	ctx.offset = off;
 	return nullptr;
 }
 
+ast_node* parse_function(parse_context& ctx) {
+	i64 off = ctx.offset;
+
+	ignore_ws(ctx);
+	if (!parse_literal(ctx, "fn")) {
+		ctx.offset = off;
+		return nullptr;
+	}
+
+	ignore_ws(ctx);
+	auto symbol = parse_symbol(ctx);
+	if(!symbol) {
+		ctx.offset = off;
+		return nullptr;
+	}
+
+	ignore_ws(ctx);
+	auto body = parse_lambda(ctx);
+	if (!body) {
+		ctx.offset = off;
+		return nullptr;
+	}
+
+	return make_function(*symbol, body);
+}
+
+struct library {
+	std::vector<ast_node*> functions;
+};
+
+library parse_library(parse_context& ctx) {
+	std::vector<ast_node*> functions;
+	do {
+		ignore_ws(ctx);
+		ast_node* n = nullptr;
+		if (n = parse_function(ctx)) {
+			functions.push_back(n);
+		}
+		else {
+			break;
+		}
+	} while(true);
+	return library {
+		.functions = functions
+	};
+}
+
+library parse_ast(const std::string& src) {
+	parse_context ctx{ src, 0 };
+	return parse_library(ctx);
+}
+
 enum struct value_type {
 	unknown = 0,
 	i64,
+	string,
 	function
 };
 
@@ -798,7 +902,8 @@ struct value {
 	value_type type;
 
 	i64 as_i64;
-	function* as_function;
+	std::string as_string;
+	lambda* as_function;
 };
 
 struct eval_scope {
@@ -806,17 +911,16 @@ struct eval_scope {
 };
 
 struct eval_context {
-	ast_node* root;
-
 	value ret_value;
 	std::vector<eval_scope> scopes;
+	std::vector<std::pair<std::string, std::function<void(eval_context&, std::vector<value> args)>>> internal_functions;
 };
 
 value get_value(eval_context& ctx, const std::string& name) {
 	auto& s = ctx.scopes[ctx.scopes.size() - 1];
 	for (auto& [n, v] : s.values) {
 		if (n == name) return v;
-	}
+	}	
 	assert(false);
 	return {};
 }
@@ -824,6 +928,8 @@ value get_value(eval_context& ctx, const std::string& name) {
 std::string get_value_type(const value& v) {
 	switch (v.type) {
 		case value_type::i64: return "i64";
+		case value_type::string: return "string";
+		case value_type::function: return "fn";
 	}
 	return "???";
 }
@@ -850,7 +956,28 @@ void set_rval_i64(eval_context& ctx, i64 v) {
 	};
 }
 
-void set_rval_fn(eval_context& ctx, function* fn) {
+void set_rval_str(eval_context& ctx, const std::string& v) {
+	ctx.ret_value = value{
+		.type = value_type::string,
+		.as_string = v
+	};
+}
+
+void set_value_fn(eval_context& ctx, const std::string& name, lambda* fn) {
+	set_value(ctx, name, value{
+		.type = value_type::function,
+		.as_function = fn
+	});
+}
+
+void set_value_str(eval_context& ctx, const std::string& name, const std::string& v) {
+	set_value(ctx, name, value{
+		.type = value_type::string,
+		.as_string = v
+	});
+}
+
+void set_rval_fn(eval_context& ctx, lambda* fn) {
 	ctx.ret_value = value{
 		.type = value_type::function,
 		.as_function = fn
@@ -922,10 +1049,10 @@ i64 evaluate(eval_context& ctx, ast_node* v) {
 
 			value res{};
 			switch (v->as_bin_op.type) {
-			case bin_op_type::add: res = add(lhs, rhs); break;
-			case bin_op_type::sub: res = sub(lhs, rhs); break;
-			case bin_op_type::mul: res = mul(lhs, rhs); break;
-			case bin_op_type::div: res = div(lhs, rhs); break;
+				case bin_op_type::add: res = add(lhs, rhs); break;
+				case bin_op_type::sub: res = sub(lhs, rhs); break;
+				case bin_op_type::mul: res = mul(lhs, rhs); break;
+				case bin_op_type::div: res = div(lhs, rhs); break;
 			}
 			ctx.ret_value = res;
 			return 0;
@@ -942,13 +1069,20 @@ i64 evaluate(eval_context& ctx, ast_node* v) {
 		}
 		case ast_node_type::call:
 		{
-			value fn = get_value(ctx, v->as_call.target);
-			
 			std::vector<value> args;
 			for (auto& arg : v->as_call.args) {
 				evaluate(ctx, arg);
 				args.push_back(ctx.ret_value);
 			}
+
+			for (auto& [name, cb] : ctx.internal_functions) {
+				if (name == v->as_call.target) {
+					cb(ctx, args);
+					return 0;
+				}
+			}
+
+			value fn = get_value(ctx, v->as_call.target);
 
 			ctx.scopes.push_back({});
 			init_value(ctx, "this", value{
@@ -961,14 +1095,14 @@ i64 evaluate(eval_context& ctx, ast_node* v) {
 				}
 				init_value(ctx, fn.as_function->args[i].name, args[i]);
 			}
-
+			assert(fn.as_function->args.size() == args.size()); // Passed arg count must match function signature
 			evaluate(ctx, fn.as_function->scope);
 			ctx.scopes.pop_back();
 			return 0;
 		}
-		case ast_node_type::function:
+		case ast_node_type::lambda:
 		{
-			set_rval_fn(ctx, &v->as_function);
+			set_rval_fn(ctx, &v->as_lambda);
 			return 0;
 		}
 		case ast_node_type::assign:
@@ -986,6 +1120,11 @@ i64 evaluate(eval_context& ctx, ast_node* v) {
 		case ast_node_type::symbol:
 		{
 			ctx.ret_value = get_value(ctx, v->as_symbol);
+			return 0;
+		}
+		case ast_node_type::string: 
+		{
+			set_rval_str(ctx, v->as_string);
 			return 0;
 		}
 		case ast_node_type::conditional: 
@@ -1023,6 +1162,11 @@ i64 evaluate(eval_context& ctx, ast_node* v) {
 
 			return 0;
 		}
+		case ast_node_type::function: 
+		{
+			set_value_fn(ctx, v->as_function.symbol, &v->as_function.lambda->as_lambda);
+			return 0;
+		}
 		default: 
 		{
 			assert(false);
@@ -1032,9 +1176,57 @@ i64 evaluate(eval_context& ctx, ast_node* v) {
 	return 0;
 }
 
-i64 evaluate(eval_context& ctx) {
+lambda* find_function(eval_context& ctx, const std::string& name) {
+	for (auto& [n, v] : ctx.scopes[0].values) {
+		if (n == name) {
+			assert(v.type == value_type::function);
+			return v.as_function;
+		}
+	}
+	return nullptr;
+}
+
+void register_internal_function(eval_context& ctx, const std::string& name, std::function<void(eval_context&, std::vector<value>)> fn) {
+	ctx.internal_functions.push_back({name, fn});
+}
+
+i64 evaluate(const library& lib) {
+	eval_context ctx{};
+
+	register_internal_function(ctx, "print", [](eval_context& ctx, std::vector<value> vals) {
+		bool first = true;
+		for (auto& v : vals) {
+			if (!first) {
+				std::cout << " ";
+			}
+			first = true;
+			switch (v.type) {
+				case value_type::string: 
+				{
+					std::cout << v.as_string;
+					break;
+				}
+				case value_type::i64: 
+				{
+					std::cout << v.as_i64;
+					break;
+				}
+				default:
+				{
+					std::cout << "[unknown]";
+					break;
+				}
+			}
+		}
+		std::cout << "\n";
+		set_rval_i64(ctx, 0);
+	});
+
 	ctx.scopes.push_back({});
-	evaluate(ctx, ctx.root);
+	for (auto& fn : lib.functions) {
+		evaluate(ctx, fn);
+	}
+	evaluate(ctx, find_function(ctx, "main")->scope);
 	assert(ctx.ret_value.type == value_type::i64);
 	return ctx.ret_value.as_i64;
 }
@@ -1043,11 +1235,6 @@ std::optional<std::string> read_file(const std::string& fname) {
 	std::fstream fs(fname, std::fstream::in);
 	if (!fs) return {};
 	return std::string(std::istreambuf_iterator<char>(fs), std::istreambuf_iterator<char>());
-}
-
-ast_node* parse_ast(const std::string& src) {
-	parse_context ctx{ src, 0 };
-	return parse_statement_sequence(ctx);
 }
 
 std::vector<std::string> parse_args(int argc, const char* argv[]) {
@@ -1068,25 +1255,20 @@ int main(int argc, const char* argv[]) {
 
 	std::string src_file = args[1];
 
-	auto file = read_file("example/0_test.fl");
+	auto file = read_file("example/0_fibonacci.fl");
 	if (!file) {
 		std::cout << "Unable to read file.\n";
 		return -1;
 	}
 
-	ast_node* ast = parse_ast(*file);
+	library ast = parse_ast(*file);
 
-	if (!ast) {
+	if (ast.functions.empty()) {
 		std::cout << "Unable to parse AST.\n";
 		return -1;
 	}
 
-	eval_context ectx{
-		.root = ast,
-	};
-
-	i64 res = evaluate(ectx);
-	std::cout << "res: " << res << "\n";
+	i64 res = evaluate(ast);
 
 	return (int)res;
 }
