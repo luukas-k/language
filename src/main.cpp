@@ -5,6 +5,7 @@
 #include <assert.h>
 #include <fstream>
 #include <functional>
+#include <chrono>
 
 using i64 = int64_t;
 
@@ -22,7 +23,8 @@ enum struct ast_node_type {
 	symbol,
 	conditional,
 	comparison,
-	object_type
+	object_type,
+	object_init,
 };
 
 struct ast_node;
@@ -97,6 +99,11 @@ struct object_type {
 	std::vector<argument_decl> members;
 };
 
+struct object_init {
+	std::string type;
+	std::vector<std::pair<std::string, ast_node*>> initial_values;
+};
+
 struct ast_node {
 	ast_node_type type;
 
@@ -114,6 +121,7 @@ struct ast_node {
 	comparison as_comparison;
 	std::string as_string;
 	object_type as_object_type;
+	object_init as_object_init;
 };
 
 ast_node* make_number(i64 v) {
@@ -237,13 +245,27 @@ ast_node* make_object_type(const std::string& name, const std::vector<argument_d
 	};
 }
 
+ast_node* make_object_init(const std::string& name, const std::vector<std::pair<std::string, ast_node*>> vals) {
+	return new ast_node{
+		.type = ast_node_type::object_init,
+		.as_object_init = {
+			.type = name,
+			.initial_values = vals
+		}
+	};
+}
+
 struct parse_context {
 	std::string src;
 	i64 offset;
+	std::vector<std::string> errors;
 
 	char peek() const { return src[offset]; }
 	char get() { return src[offset++]; }
+
+	void error(const std::string& msg){ errors.push_back(msg); }
 };
+
 
 bool is_num(char c) { return c >= '0' && c <= '9'; }
 bool is_ws(char c) {
@@ -558,7 +580,7 @@ ast_node* parse_initialize(parse_context& ctx) {
 	i64 off = ctx.offset;
 
 	ignore_ws(ctx);
-	auto let = parse_literal(ctx, "let ");
+	auto let = parse_literal(ctx, "let");
 	if (!let) {
 		ctx.offset = off;
 		return nullptr;
@@ -567,6 +589,7 @@ ast_node* parse_initialize(parse_context& ctx) {
 	ignore_ws(ctx);
 	auto lhs = parse_argument_decl(ctx);
 	if (!lhs) {
+		ctx.error("No value decleration after 'let'.");
 		ctx.offset = off;
 		return nullptr;
 	}
@@ -574,6 +597,7 @@ ast_node* parse_initialize(parse_context& ctx) {
 	ignore_ws(ctx);
 	bool assign = parse_literal(ctx, "=");
 	if (!assign) {
+		ctx.error("No assignment after 'let'.");
 		ctx.offset = off;
 		return nullptr;
 	}
@@ -581,11 +605,85 @@ ast_node* parse_initialize(parse_context& ctx) {
 	ignore_ws(ctx);
 	auto rhs = parse_expr(ctx);
 	if (!rhs) {
+		ctx.error("Missing expression after assignment in value initialization.");
 		ctx.offset = off;
 		return nullptr;
 	}
 
 	return make_initialize(*lhs, rhs);
+}
+
+ast_node* parse_object_initialize(parse_context& ctx) {
+	i64 off = ctx.offset;
+
+	ignore_ws(ctx);
+	auto tname = parse_symbol(ctx);
+	if(!tname) {
+		ctx.offset = off;
+		return nullptr;
+	}
+	
+	ignore_ws(ctx);
+	if (!parse_literal(ctx, "{")) {
+		ctx.offset = off;
+		return nullptr;
+	}
+
+	bool is_first = true;
+	std::vector<std::pair<std::string, ast_node*>> initial_vals;
+	do {
+		if (!is_first) {
+			ignore_ws(ctx);
+			if (!parse_literal(ctx, ",")) {
+				break;
+			}
+		}
+		is_first = false;
+		
+		ignore_ws(ctx);
+		if (!parse_literal(ctx, ".")) {
+			break;
+		}
+		
+		ignore_ws(ctx);
+		auto sym = parse_symbol(ctx);
+		if (!sym) {
+			ctx.error("No symbol after '.' in object initializer.");
+			assert(false);
+			ctx.offset = off;
+			return nullptr;
+		}
+
+		ignore_ws(ctx);
+		if (!parse_literal(ctx, "=")) {
+			ctx.error("No '=' after object field specifier in object initializer.");
+			// error();
+			assert(false);
+			ctx.offset = off;
+			return nullptr;
+		}
+
+		ignore_ws(ctx);
+		ast_node* val = parse_expr(ctx);
+		
+		if (!val) {
+			ctx.error("No expression after object field specifier and '='.");
+			ctx.offset = off;
+			return nullptr;
+		}
+
+		initial_vals.push_back({*sym, val});
+	} while(true);
+	
+	ignore_ws(ctx);
+	if (!parse_literal(ctx, "}")) {
+		ctx.error("No closing '}' in object initializer.");
+		assert(false);
+		ctx.offset = off;
+		return nullptr;
+	}
+
+	return make_object_init(*tname, initial_vals);
 }
 
 ast_node* parse_comparison(parse_context& ctx) {
@@ -618,6 +716,9 @@ ast_node* parse_expr(parse_context& ctx) {
 	i64 off = ctx.offset;
 
 	ignore_ws(ctx);
+
+	ast_node* obj_init = parse_object_initialize(ctx);
+	if(obj_init) return obj_init;
 
 	ast_node* init = parse_initialize(ctx);
 	if (init) return init;
@@ -954,20 +1055,23 @@ library parse_library(parse_context& ctx) {
 	};
 }
 
-library parse_ast(const std::string& src) {
+std::pair<library, std::vector<std::string>> parse_ast(const std::string& src) {
 	parse_context ctx{ src, 0 };
 	library lib = parse_library(ctx);
 	ignore_ws(ctx);
-	assert(ctx.offset == ctx.src.size()); // need to consume everything
-	return lib;
+	//assert(ctx.offset == ctx.src.size()); // need to consume everything
+	return { lib, ctx.errors };
 }
 
 enum struct value_type {
 	unknown = 0,
 	i64,
 	string,
-	function
+	function,
+	object,
 };
+
+struct object_data;
 
 struct value {
 	value_type type;
@@ -975,6 +1079,12 @@ struct value {
 	i64 as_i64;
 	std::string as_string;
 	lambda* as_function;
+	object_data* as_object;
+};
+
+struct object_data {
+	std::string type_name;
+	std::vector<std::pair<std::string, value>> members;
 };
 
 struct eval_scope {
@@ -987,6 +1097,32 @@ struct eval_context {
 	std::vector<eval_scope> scopes;
 	std::vector<std::pair<std::string, std::function<void(eval_context&, std::vector<value> args)>>> internal_functions;
 };
+
+value construct_object(eval_context& ctx, const std::string& name, std::vector<std::pair<std::string, value>> values) {
+	for (auto& t : ctx.ast->object_types) {
+		if (t->as_object_type.name == name) {
+			value rv{};
+			rv.type = value_type::object;
+
+			rv.as_object = new object_data{ .type_name = name };
+			for (auto& m : t->as_object_type.members) {
+				rv.as_object->members.push_back({m.name, {}});
+			}
+			for (auto& [n, v] : values) {
+				for (auto& [nn, vv] : rv.as_object->members) {
+					if (n == nn) {
+						vv = v;
+						break;
+					}
+				}
+			}
+
+			return rv;
+		}
+	}
+	assert(false);
+	return {};
+}
 
 value get_value(eval_context& ctx, const std::string& name) {
 	auto& s = ctx.scopes[ctx.scopes.size() - 1];
@@ -1240,6 +1376,18 @@ i64 evaluate(eval_context& ctx, ast_node* v) {
 			set_value_fn(ctx, v->as_function.symbol, &v->as_function.lambda->as_lambda);
 			return 0;
 		}
+		case ast_node_type::object_init: 
+		{
+			std::vector<std::pair<std::string, value>> values;
+			for (auto& [n, v] : v->as_object_init.initial_values) {
+				evaluate(ctx, v);
+				values.emplace_back(n, ctx.ret_value);
+			}
+			
+			value rv = construct_object(ctx, v->as_object_init.type, values);
+			ctx.ret_value = rv;
+			return 0;
+		}
 		default: 
 		{
 			assert(false);
@@ -1267,7 +1415,7 @@ i64 evaluate(const library& lib) {
 	eval_context ctx{};
 	ctx.ast = &lib;
 
-	register_internal_function(ctx, "print", [](eval_context& ctx, std::vector<value> vals) {
+	std::function<void(eval_context&, std::vector<value>)> print = [&print](eval_context& ctx, std::vector<value> vals) {
 		bool first = true;
 		for (auto& v : vals) {
 			if (!first) {
@@ -1285,6 +1433,20 @@ i64 evaluate(const library& lib) {
 					std::cout << v.as_i64;
 					break;
 				}
+				case value_type::object:
+				{
+					print(ctx, {value{.type = value_type::string, .as_string = v.as_object->type_name + " { "}});
+					bool is_first = true;
+					for (auto& [name, val] : v.as_object->members) {
+						if (!is_first) {
+							print(ctx, {value{.type = value_type::string, .as_string = " , "}});
+						}
+						is_first = false;
+						print(ctx, {value{.type = value_type::string, .as_string = "." + name + " = "}, val});
+					}
+					print(ctx, {value{.type = value_type::string, .as_string = " }"}});
+					break;
+				}
 				default:
 				{
 					std::cout << "[unknown]";
@@ -1292,8 +1454,12 @@ i64 evaluate(const library& lib) {
 				}
 			}
 		}
-		std::cout << "\n";
 		set_rval_i64(ctx, 0);
+	};
+	register_internal_function(ctx, "print", print);
+	register_internal_function(ctx, "println", [&print](eval_context& ctx, std::vector<value> vals) {
+		print(ctx, vals);
+		print(ctx, {value{.type = value_type::string, .as_string = "\n"}});
 	});
 
 	ctx.scopes.push_back({});
@@ -1321,6 +1487,14 @@ std::vector<std::string> parse_args(int argc, const char* argv[]) {
 	return args;
 }
 
+class timer {
+public:
+	timer(){}
+	double elapsed(){}
+private:
+	
+};
+
 int main(int argc, const char* argv[]) {
 	auto args = parse_args(argc, argv);
 
@@ -1331,19 +1505,33 @@ int main(int argc, const char* argv[]) {
 
 	std::string src_file = args[1];
 
-	auto file = read_file("example/0_fibonacci.fl");
+	// std::string fname = "example/0_fibonacci.fl";
+	std::string fname = "example/1_objects.fl";
+	
+	auto file = read_file(fname);
 	if (!file) {
 		std::cout << "Unable to read file.\n";
 		return -1;
 	}
 
-	library ast = parse_ast(*file);
+	auto[ast,errors] = parse_ast(*file);
+	
+	if (errors.size() == 0) {
+		std::cout << "[Built successfully]\n";
+	}
+	else {
+		std::cout << "[Encountered errors in build]\n";
+		for (auto& err : errors) {
+			std::cout << err << "\n";
+		}
+	}
 
 	if (ast.functions.empty()) {
 		std::cout << "Unable to parse AST.\n";
 		return -1;
 	}
 
+	std::cout << "[Running]\n";
 	i64 res = evaluate(ast);
 
 	return (int)res;
