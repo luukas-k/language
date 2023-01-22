@@ -1489,13 +1489,18 @@ std::vector<std::string> parse_args(int argc, const char* argv[]) {
 
 class timer {
 public:
-	timer(){}
-	double elapsed(){}
+	timer(){ mStart = std::chrono::high_resolution_clock::now(); }
+	double elapsed(){
+		auto now = std::chrono::high_resolution_clock::now();
+		return std::chrono::duration_cast<std::chrono::milliseconds>(now - mStart).count() * 0.001;
+	}
 private:
-	
+	std::chrono::steady_clock::time_point mStart;
 };
 
 int main(int argc, const char* argv[]) {
+	timer t;
+
 	auto args = parse_args(argc, argv);
 
 	if (args.size() <= 1) {
@@ -1514,6 +1519,9 @@ int main(int argc, const char* argv[]) {
 		return -1;
 	}
 
+	double read_end = t.elapsed();
+	std::cout << "[Read file in]: " << read_end << "ms\n";
+
 	auto[ast,errors] = parse_ast(*file);
 	
 	if (errors.size() == 0) {
@@ -1531,8 +1539,14 @@ int main(int argc, const char* argv[]) {
 		return -1;
 	}
 
+	auto compile_end = t.elapsed();
+	std::cout << "[Built program in]: " << compile_end - read_end << "ms\n";
+
 	std::cout << "[Running]\n";
 	i64 res = evaluate(ast);
+
+	auto run_end = t.elapsed();
+	std::cout << "[Ran program in]: " << run_end - compile_end << "ms\n";
 
 	return (int)res;
 }
