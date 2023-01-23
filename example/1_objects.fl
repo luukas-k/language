@@ -4,8 +4,8 @@ object Person {
 }
 
 fn main() -> i64 {
-    let beea = Person { .name = "Beea", .age = 20 };
-    let luukas = Person { .name = "Luukas", .age = 21 };
-    println(beea, " ", luukas);
+    let b = Person { .name = "B", .age = 20 };
+    let l = Person { .name = "L", .age = 21 };
+    println(b, " ", l);
     0;
 }
