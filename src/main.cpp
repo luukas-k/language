@@ -1168,6 +1168,145 @@ std::pair<library, std::vector<std::string>> parse_ast(const std::string& src) {
 	return { lib, ctx.errors };
 }
 
+struct type_context {
+	std::vector<std::string> errors;
+	std::string result_type;
+
+	std::vector<std::vector<std::pair<std::string, std::string>>> types;
+
+	void error(const std::string& msg){ errors.push_back(msg); }
+};
+
+void type_check(type_context& ctx, library& lib, ast_node* node) {
+	auto get_type = [&](const std::string& name) -> std::string {
+		for (auto& t : ctx.types) {
+			for (auto& [n, v] : t) {
+				if(n == name)
+					return v;
+			}
+		}
+		return "";
+	};
+	switch (node->type) {
+		case ast_node_type::lambda:
+		{
+			for (auto& s : node->as_lambda.scope->as_sequence) {
+				type_check(ctx, lib, s);
+				// ctx.result_type = "";
+			}
+			break;
+		}
+		case ast_node_type::initialize: 
+		{
+			type_check(ctx, lib, node->as_initialize.value);
+
+			if (node->as_initialize.symbol.type.value_or(ctx.result_type) != ctx.result_type) {
+				ctx.error("(Initialize) Type mismatch: '" + *node->as_initialize.symbol.type + "' != '" + ctx.result_type + "'.");
+			}
+			else {
+				node->as_initialize.symbol.type = ctx.result_type;
+				ctx.types[ctx.types.size() - 1].push_back({node->as_initialize.symbol.name, node->as_initialize.symbol.type.value_or("?")});
+			}
+			break;
+		}
+		case ast_node_type::number: 
+		{
+			ctx.result_type = "i64";
+			break;
+		}
+		case ast_node_type::string:
+		{
+			ctx.result_type = "string";
+			break;
+		}
+		case ast_node_type::loop: 
+		{
+			if(node->as_loop.condition)
+				type_check(ctx, lib, node->as_loop.condition);
+			ctx.types.push_back({});
+			for (auto& s : node->as_loop.scope->as_sequence) {
+				type_check(ctx, lib, s);
+			}
+			ctx.types.pop_back();
+			ctx.result_type = "";
+			break;
+		}
+		case ast_node_type::comparison: 
+		{
+			type_check(ctx, lib, node->as_comparison.lhs);
+			auto lhs_type = ctx.result_type;
+			type_check(ctx, lib, node->as_comparison.rhs);
+			auto rhs_type = ctx.result_type;
+
+			if(lhs_type != rhs_type)
+				ctx.error("(Comparison) Type mismatch: '" + lhs_type + "' != '" + rhs_type + "'.");
+
+			ctx.result_type = "i64";
+			break;
+		}
+		case ast_node_type::symbol: 
+		{
+			ctx.result_type = get_type(node->as_symbol);
+			break;
+		}
+		case ast_node_type::bin_op:
+		{
+			type_check(ctx, lib, node->as_bin_op.lhs);
+			auto lhs_type = ctx.result_type;
+			type_check(ctx, lib, node->as_bin_op.rhs);
+			auto rhs_type = ctx.result_type;
+
+			if(lhs_type != rhs_type)
+				ctx.error("(Binary Op) Type mismatch: '" + lhs_type + "' != '" + rhs_type + "'.");
+
+			ctx.result_type = lhs_type;
+
+			break;
+		}
+		case ast_node_type::assign:
+		{
+			auto lhs_t = get_type(node->as_assign.symbol);
+			type_check(ctx, lib, node->as_assign.value);
+			auto rhs_t = ctx.result_type;
+
+			if (lhs_t != rhs_t) {
+				ctx.error("(Assign) Type mismatch in assign: '" + lhs_t + "' != '" + rhs_t + "'.");
+			}
+			ctx.result_type = "";
+
+			break;
+		}
+		case ast_node_type::call: 
+		{
+			ctx.result_type = "?";
+			break;
+		}
+		default: 
+		{
+			assert(false);
+			break;
+		}
+	}
+}
+
+std::vector<std::string> type_check(library& lib) {
+	type_context ctx{};
+	ctx.types.push_back({});
+	for (auto& fn : lib.functions) {
+		ctx.types[0].push_back({fn->as_function.symbol, "?"});
+		ctx.types.push_back({});
+		for (auto& [name, type] : fn->as_function.lambda->as_lambda.args) {
+			if(!type.has_value()) 
+				ctx.error("Function '" + name + "' arg '" + name + "' doesn't have a type.");
+			else
+				ctx.types[0].push_back({name, *type});
+		}
+		type_check(ctx, lib, fn->as_function.lambda);
+		ctx.types.pop_back();
+	}
+	return ctx.errors;
+}
+
 enum struct value_type {
 	unknown = 0,
 	i64,
@@ -1276,6 +1415,7 @@ void set_value(eval_context& ctx, const std::string& name, value new_v) {
 	auto& last_scope = ctx.scopes[ctx.scopes.size() - 1];
 	last_scope.values.push_back({ name, new_v });
 }
+
 void init_value(eval_context& ctx, const std::string& name, value new_v) {
 	auto& s = ctx.scopes[ctx.scopes.size() - 1];
 	s.values.push_back({ name, new_v });
@@ -1662,9 +1802,12 @@ std::vector<std::string> parse_args(int argc, const char* argv[]) {
 class timer {
 public:
 	timer(){ mStart = std::chrono::high_resolution_clock::now(); }
+	void reset() {
+		mStart = std::chrono::high_resolution_clock::now();
+	}
 	double elapsed(){
 		auto now = std::chrono::high_resolution_clock::now();
-		return std::chrono::duration_cast<std::chrono::milliseconds>(now - mStart).count() * 0.001;
+		return (double)std::chrono::duration_cast<std::chrono::milliseconds>(now - mStart).count() * 0.001;
 	}
 private:
 	std::chrono::steady_clock::time_point mStart;
@@ -1687,16 +1830,16 @@ int main(int argc, const char* argv[]) {
 	// std::string fname = "example/1_objects.fl";
 	
 	auto file = read_file(fname);
+
 	if (!file) {
 		std::cout << "Unable to read file.\n";
 		return -1;
 	}
 
-	double read_end = t.elapsed();
-	std::cout << "[Read file in]: " << read_end << "ms\n";
-
+	t.reset();
 	auto[ast,errors] = parse_ast(*file);
-	
+	auto compile_end = t.elapsed();
+
 	if (errors.size() == 0) {
 		std::cout << "[Built successfully]\n";
 	}
@@ -1705,21 +1848,39 @@ int main(int argc, const char* argv[]) {
 		for (auto& err : errors) {
 			std::cout << err << "\n";
 		}
+		return -1;
 	}
 
 	if (ast.functions.empty()) {
 		std::cout << "Unable to parse AST.\n";
 		return -1;
 	}
+	
+	std::cout << "[Built program in]: " << compile_end << "s\n";
 
-	auto compile_end = t.elapsed();
-	std::cout << "[Built program in]: " << compile_end - read_end << "ms\n";
+	t.reset();
+	auto type_errors = type_check(ast);
+	auto tc_end = t.elapsed();
+
+	if (type_errors.size() == 0) {
+		std::cout << "[No type errors]\n";
+	}
+	else {
+		std::cout << "[Encountered type errors in build]\n";
+		for (auto& err : type_errors) {
+			std::cout << err << "\n";
+		}
+		return -1;
+	}
+	std::cout << "[Checked types in]: " << tc_end << "s\n";
 
 	std::cout << "[Running]\n";
+	
+	t.reset();
 	i64 res = evaluate(ast);
-
 	auto run_end = t.elapsed();
-	std::cout << "[Ran program in]: " << run_end - compile_end << "ms\n";
+
+	std::cout << "[Ran program in]: " << run_end << "s\n";
 
 	return (int)res;
 }
