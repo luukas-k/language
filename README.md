@@ -32,7 +32,7 @@ fn main() -> i64 {
         println("fib(", k, ") = ", fib(k));
         k = k + 1;
     }
-	0;
+    0;
 }
 
 ```
