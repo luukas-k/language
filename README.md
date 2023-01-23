@@ -2,11 +2,13 @@
 
 ## Features
 
+- Type checker
 - Functions
 - Lambdas
 - Recursion
-- Basic datatypes: Integers, Strings
-- Conditionals: If
+- Basic datatypes: i64, string
+- Conditionals: if, else
+- Loops: while
 
 
 ## Contributing
