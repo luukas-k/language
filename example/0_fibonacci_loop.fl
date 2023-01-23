@@ -12,11 +12,10 @@ fn fib(n: i64) -> i64 {
 }
 
 fn main() -> i64 {
-	let a: i64 = 6;
-
-	println(a);
-	println("fib(", 5, ") = ", fib(5));
-	println("fib(", 10, ") = ", fib(10));
-	println("fib(", 15, ") = ", fib(15));
-	println("fib(", 20, ") = ", fib(20));
+	let k = 0;
+	while(k <= 93){
+		println("fib(", k, ") = ", fib(k));
+		k = k + 1;
+	}
+	0;
 }
