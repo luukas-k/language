@@ -1,10 +1,11 @@
 object Person {
+    name: string
     age: i64
-    time: i64
 }
 
 fn main() -> i64 {
-    let p = Person { .age = 16, .time = 100 };
-    println(p);
+    let beea = Person { .name = "Beea", .age = 20 };
+    let luukas = Person { .name = "Luukas", .age = 21 };
+    println(beea, " ", luukas);
     0;
 }

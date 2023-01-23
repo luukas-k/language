@@ -25,6 +25,7 @@ enum struct ast_node_type {
 	comparison,
 	object_type,
 	object_init,
+	loop,
 };
 
 struct ast_node;
@@ -72,6 +73,19 @@ struct if_node {
 	ast_node* condition;
 	ast_node* scope;
 	ast_node* else_scope;
+};
+
+enum struct loop_type {
+	unknown = 0,
+	loop_for,
+	loop_while,
+	loop_infinite
+};
+
+struct loop_node {
+	loop_type type;
+	ast_node* condition;
+	ast_node* scope;
 };
 
 enum struct comparison_type {
@@ -122,6 +136,7 @@ struct ast_node {
 	std::string as_string;
 	object_type as_object_type;
 	object_init as_object_init;
+	loop_node as_loop;
 };
 
 ast_node* make_number(i64 v) {
@@ -251,6 +266,17 @@ ast_node* make_object_init(const std::string& name, const std::vector<std::pair<
 		.as_object_init = {
 			.type = name,
 			.initial_values = vals
+		}
+	};
+}
+
+ast_node* make_loop(ast_node* condition, ast_node* scope, loop_type t) {
+	return new ast_node{
+		.type = ast_node_type::loop,
+		.as_loop = {
+			.type = t,
+			.condition = condition,
+			.scope = scope
 		}
 	};
 }
@@ -546,6 +572,39 @@ ast_node* parse_call(parse_context& ctx) {
 	return make_call(*sym, args);
 }
 
+ast_node* parse_while(parse_context& ctx) {
+	i64 off = ctx.offset;
+
+	ignore_ws(ctx);
+	if(!parse_literal(ctx, "while")){
+		ctx.offset = off;
+		return nullptr;
+	}
+
+	ignore_ws(ctx);
+	if(!parse_literal(ctx, "(")){
+		ctx.offset = off;
+		return nullptr;
+	}
+
+	ignore_ws(ctx);
+	ast_node* cond = parse_expr(ctx);
+
+	ignore_ws(ctx);
+	if(!parse_literal(ctx, ")")){
+		ctx.offset = off;
+		return nullptr;
+	}
+
+	ignore_ws(ctx);
+	ast_node* scope = parse_scope(ctx);
+	if (!scope) {
+		ctx.offset = off;
+		return nullptr;
+	}
+
+	return make_loop(cond, scope, loop_type::loop_while);
+}
 
 ast_node* parse_assign(parse_context& ctx) {
 	i64 off = ctx.offset;
@@ -686,18 +745,60 @@ ast_node* parse_object_initialize(parse_context& ctx) {
 	return make_object_init(*tname, initial_vals);
 }
 
+comparison_type parse_comparison_type(parse_context& ctx) {
+	i64 off = ctx.offset;
+
+	if (ctx.peek() == '=') {
+		ctx.get();
+		if (ctx.peek() == '=') {
+			ctx.get();
+			return comparison_type::eq;
+		}
+	}
+	else if (ctx.peek() == '>') {
+		ctx.get();
+		if (ctx.peek() == '=') {
+			ctx.get();
+			return comparison_type::gte;
+		}
+		else {
+			return comparison_type::gt;
+		}
+	}
+	else if (ctx.peek() == '<') {
+		ctx.get();
+		if (ctx.peek() == '=') {
+			ctx.get();
+			return comparison_type::lte;
+		}
+		else {
+			return comparison_type::lt;
+		}
+	}
+
+	ctx.offset = off;
+	return comparison_type::unknown;
+}
+
 ast_node* parse_comparison(parse_context& ctx) {
 	i64 off = ctx.offset;
 
 	ignore_ws(ctx);
 	ast_node* lhs = parse_number(ctx);
 	if (!lhs) {
-		ctx.offset = off;
-		return nullptr;
+		auto sym = parse_symbol(ctx);
+		if (sym) {
+			lhs = make_symbol(*sym);
+		}
+		else {
+			ctx.offset = off;
+			return nullptr;
+		}
 	}
-
+	
 	ignore_ws(ctx);
-	if (!parse_literal(ctx, "==")) {
+	comparison_type cmp_t = parse_comparison_type(ctx);
+	if (cmp_t == comparison_type::unknown) {
 		ctx.offset = off;
 		return nullptr;
 	}
@@ -709,7 +810,7 @@ ast_node* parse_comparison(parse_context& ctx) {
 		return nullptr;
 	}
 
-	return make_comparison(lhs, rhs, comparison_type::eq);
+	return make_comparison(lhs, rhs, cmp_t);
 }
 
 ast_node* parse_expr(parse_context& ctx) {
@@ -812,6 +913,10 @@ ast_node* parse_statement(parse_context& ctx) {
 	ast_node* if_node = parse_if(ctx);
 	if (if_node) {
 		return if_node;
+	}
+	ast_node* while_loop = parse_while(ctx);
+	if (while_loop) {
+		return while_loop;
 	}
 
 	ignore_ws(ctx);
@@ -1099,25 +1204,33 @@ struct eval_context {
 };
 
 value construct_object(eval_context& ctx, const std::string& name, std::vector<std::pair<std::string, value>> values) {
-	for (auto& t : ctx.ast->object_types) {
-		if (t->as_object_type.name == name) {
-			value rv{};
-			rv.type = value_type::object;
+	if (name == "i64") {
+		return values[0].second;
+	}
+	else if (name == "string") {
+		return values[0].second;
+	}
+	else{
+		for (auto& t : ctx.ast->object_types) {
+			if (t->as_object_type.name == name) {
+				value rv{};
+				rv.type = value_type::object;
 
-			rv.as_object = new object_data{ .type_name = name };
-			for (auto& m : t->as_object_type.members) {
-				rv.as_object->members.push_back({m.name, {}});
-			}
-			for (auto& [n, v] : values) {
-				for (auto& [nn, vv] : rv.as_object->members) {
-					if (n == nn) {
-						vv = v;
-						break;
+				rv.as_object = new object_data{ .type_name = name };
+				auto get_value = [&](const std::string& name) {
+					for (auto& [n, v] : values) {
+						if(n == name)
+							return v;
 					}
+					assert(false); // No value given in initializer for 'name'
+					return value{.type = value_type::unknown};
+				};
+				for (auto& m : t->as_object_type.members) {
+					rv.as_object->members.push_back({m.name, get_value(m.name)});
 				}
-			}
 
-			return rv;
+				return rv;
+			}
 		}
 	}
 	assert(false);
@@ -1125,32 +1238,43 @@ value construct_object(eval_context& ctx, const std::string& name, std::vector<s
 }
 
 value get_value(eval_context& ctx, const std::string& name) {
-	auto& s = ctx.scopes[ctx.scopes.size() - 1];
-	for (auto& [n, v] : s.values) {
-		if (n == name) return v;
-	}	
+	for (i64 i = 0; i < ctx.scopes.size(); i++) {
+		i64 rind = ctx.scopes.size() - 1 - i;
+		auto& s = ctx.scopes[rind];
+
+		for (auto& [n, v] : s.values) {
+			if (n == name) 
+				return v;
+		}
+	}
 	assert(false);
 	return {};
 }
 
 std::string get_value_type(const value& v) {
 	switch (v.type) {
-		case value_type::i64: return "i64";
-		case value_type::string: return "string";
-		case value_type::function: return "fn";
+		case value_type::i64:		return "i64";
+		case value_type::string:	return "string";
+		case value_type::function:	return "fn";
+		case value_type::object:	return v.as_object->type_name;
 	}
 	return "???";
 }
 
 void set_value(eval_context& ctx, const std::string& name, value new_v) {
-	auto& s = ctx.scopes[ctx.scopes.size() - 1];
-	for (auto& [n, v] : s.values) {
-		if (n == name) {
-			v = new_v;
-			return;
+	for (i64 i = 0; i < ctx.scopes.size(); i++) {
+		i64 rind = ctx.scopes.size() - 1 - i;
+		auto& s = ctx.scopes[rind];
+
+		for (auto& [n, v] : s.values) {
+			if (n == name) {
+				v = new_v;
+				return;
+			}
 		}
 	}
-	s.values.push_back({ name, new_v });
+	auto& last_scope = ctx.scopes[ctx.scopes.size() - 1];
+	last_scope.values.push_back({ name, new_v });
 }
 void init_value(eval_context& ctx, const std::string& name, value new_v) {
 	auto& s = ctx.scopes[ctx.scopes.size() - 1];
@@ -1317,6 +1441,7 @@ i64 evaluate(eval_context& ctx, ast_node* v) {
 		{
 			evaluate(ctx, v->as_assign.value);
 			set_value(ctx, v->as_assign.symbol, ctx.ret_value);
+			// std::cout << v->as_assign.symbol << " = " << ctx.ret_value.as_i64 << "\n";
 			return 0;
 		}
 		case ast_node_type::initialize:
@@ -1324,6 +1449,7 @@ i64 evaluate(eval_context& ctx, ast_node* v) {
 			evaluate(ctx, v->as_initialize.value);
 			assert(v->as_initialize.symbol.type.value_or(get_value_type(ctx.ret_value)) == get_value_type(ctx.ret_value));
 			init_value(ctx, v->as_initialize.symbol.name, ctx.ret_value);
+			// std::cout << v->as_initialize.symbol.name << " := " << ctx.ret_value.as_i64 << "\n";
 			return 0;
 		}
 		case ast_node_type::symbol:
@@ -1362,6 +1488,26 @@ i64 evaluate(eval_context& ctx, ast_node* v) {
 					set_rval_i64(ctx, lhs.as_i64 == rhs.as_i64);
 					break;
 				}
+				case comparison_type::lt: 
+				{
+					set_rval_i64(ctx, lhs.as_i64 < rhs.as_i64);
+					break;
+				}
+				case comparison_type::gt: 
+				{
+					set_rval_i64(ctx, lhs.as_i64 > rhs.as_i64);
+					break;
+				}
+				case comparison_type::lte: 
+				{
+					set_rval_i64(ctx, lhs.as_i64 <= rhs.as_i64);
+					break;
+				}
+				case comparison_type::gte: 
+				{
+					set_rval_i64(ctx, lhs.as_i64 >= rhs.as_i64);
+					break;
+				}
 				default: 
 				{
 					assert(false);
@@ -1386,6 +1532,32 @@ i64 evaluate(eval_context& ctx, ast_node* v) {
 			
 			value rv = construct_object(ctx, v->as_object_init.type, values);
 			ctx.ret_value = rv;
+			return 0;
+		}
+		case ast_node_type::loop:
+		{
+			switch (v->as_loop.type) {
+				case loop_type::loop_while: 
+				{
+					while (true) {
+						evaluate(ctx, v->as_loop.condition);
+						value rhs = ctx.ret_value;
+						if (rhs.as_i64 == 0) {
+							break;
+						}
+						ctx.scopes.push_back({});
+						evaluate(ctx, v->as_loop.scope);
+						ctx.scopes.pop_back();
+					}
+					return 0;
+				}
+				default:
+				{
+					assert(false); // Unknown loop type
+					return 0;
+				}
+			}
+
 			return 0;
 		}
 		default: 
@@ -1510,8 +1682,9 @@ int main(int argc, const char* argv[]) {
 
 	std::string src_file = args[1];
 
-	// std::string fname = "example/0_fibonacci.fl";
-	std::string fname = "example/1_objects.fl";
+	// std::string fname = "example/0_fibonacci_recursive.fl";
+	std::string fname = "example/0_fibonacci_loop.fl";
+	// std::string fname = "example/1_objects.fl";
 	
 	auto file = read_file(fname);
 	if (!file) {
