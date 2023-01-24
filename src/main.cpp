@@ -907,6 +907,15 @@ ast_node* parse_if(parse_context& ctx) {
 	return make_if(expr, scope, else_block);
 }
 
+ast_node* parse_enum(parse_context& ctx) {
+	parse_literal(ctx, "enum");
+	parse_literal(ctx, "{");
+	do {
+
+	} while (true);
+	parse_literal(ctx, "}");
+}
+
 ast_node* parse_statement(parse_context& ctx) {
 	i64 off = ctx.offset;
 
@@ -1172,17 +1181,37 @@ struct type_context {
 	std::vector<std::string> errors;
 	std::string result_type;
 
-	std::vector<std::vector<std::pair<std::string, std::string>>> types;
+	std::vector<std::vector<std::pair<std::string, std::string>>> value_types;
+	std::vector<std::string> types;
+	std::vector<std::pair<std::string, std::vector<std::pair<std::string, std::string>>>> member_types;
 
 	void error(const std::string& msg){ errors.push_back(msg); }
 };
 
 void type_check(type_context& ctx, library& lib, ast_node* node) {
-	auto get_type = [&](const std::string& name) -> std::string {
-		for (auto& t : ctx.types) {
+	auto get_symbol_type = [&](const std::string& name) -> std::string {
+		for (auto& t : ctx.value_types) {
 			for (auto& [n, v] : t) {
 				if(n == name)
 					return v;
+			}
+		}
+		return "";
+	};
+	auto is_type_name = [&](const std::string& name) {
+		for (auto& s : ctx.types) {
+			if (s == name)
+				return true;
+		}
+		return false;
+	};
+	auto get_member_type = [&](const std::string& type, const std::string& mem) -> std::string {
+		for (auto& [tname, tmembers] : ctx.member_types) {
+			if (tname == type) {
+				for (auto& [n, v] : tmembers) {
+					if (mem == n)
+						return v;
+				}
 			}
 		}
 		return "";
@@ -1205,7 +1234,7 @@ void type_check(type_context& ctx, library& lib, ast_node* node) {
 			}
 			else {
 				node->as_initialize.symbol.type = ctx.result_type;
-				ctx.types[ctx.types.size() - 1].push_back({node->as_initialize.symbol.name, node->as_initialize.symbol.type.value_or("?")});
+				ctx.value_types[ctx.value_types.size() - 1].push_back({node->as_initialize.symbol.name, node->as_initialize.symbol.type.value_or("?")});
 			}
 			break;
 		}
@@ -1223,11 +1252,11 @@ void type_check(type_context& ctx, library& lib, ast_node* node) {
 		{
 			if(node->as_loop.condition)
 				type_check(ctx, lib, node->as_loop.condition);
-			ctx.types.push_back({});
+			ctx.value_types.push_back({});
 			for (auto& s : node->as_loop.scope->as_sequence) {
 				type_check(ctx, lib, s);
 			}
-			ctx.types.pop_back();
+			ctx.value_types.pop_back();
 			ctx.result_type = "";
 			break;
 		}
@@ -1246,7 +1275,7 @@ void type_check(type_context& ctx, library& lib, ast_node* node) {
 		}
 		case ast_node_type::symbol: 
 		{
-			ctx.result_type = get_type(node->as_symbol);
+			ctx.result_type = get_symbol_type(node->as_symbol);
 			break;
 		}
 		case ast_node_type::bin_op:
@@ -1265,7 +1294,7 @@ void type_check(type_context& ctx, library& lib, ast_node* node) {
 		}
 		case ast_node_type::assign:
 		{
-			auto lhs_t = get_type(node->as_assign.symbol);
+			auto lhs_t = get_symbol_type(node->as_assign.symbol);
 			type_check(ctx, lib, node->as_assign.value);
 			auto rhs_t = ctx.result_type;
 
@@ -1281,6 +1310,22 @@ void type_check(type_context& ctx, library& lib, ast_node* node) {
 			ctx.result_type = "?";
 			break;
 		}
+		case ast_node_type::object_init:
+		{
+			if (!is_type_name(node->as_object_init.type)) {
+				ctx.error("(Object Init) Unknown type name '" + node->as_object_init.type + "'.");
+			}
+			for (auto& [name, value] : node->as_object_init.initial_values) {
+				type_check(ctx, lib, value);
+				auto rhs_t = ctx.result_type;
+				auto lhs_t = get_member_type(node->as_object_init.type, name);
+				if (lhs_t != rhs_t) {
+					ctx.error("(Object Init) Member type doesn't match type defined. '" + lhs_t + "' != '" + rhs_t + "'.");
+				}
+			}
+			ctx.result_type = node->as_object_init.type;
+			break;
+		}
 		default: 
 		{
 			assert(false);
@@ -1289,20 +1334,53 @@ void type_check(type_context& ctx, library& lib, ast_node* node) {
 	}
 }
 
+
 std::vector<std::string> type_check(library& lib) {
-	type_context ctx{};
-	ctx.types.push_back({});
+	type_context ctx{
+		.errors = {},
+		.result_type = "",
+		.value_types = {},
+		.types = {
+			"i64",
+			"string"
+		},
+		.member_types = {},
+	};
+
+	auto is_type_name = [&](const std::string& name) {
+		for (auto& s : ctx.types) {
+			if (s == name)
+				return true;
+		}
+		return false;
+	};
+	ctx.value_types.push_back({});
+	for (auto& obj : lib.object_types) {
+		ctx.types.push_back(obj->as_object_type.name);
+		std::vector<std::pair<std::string, std::string>> member_types;
+		for (auto& [n, t] : obj->as_object_type.members) {
+			if (t.has_value()) {
+				if (!is_type_name(*t)) {
+					ctx.error("(Unknown type) '" + *t + "'");
+				}
+				member_types.push_back({ n, *t });
+			}
+			else
+				ctx.error("(Object types) Object doesn't have type definition.");
+		}
+		ctx.member_types.push_back({ obj->as_object_type.name, member_types });
+	}
 	for (auto& fn : lib.functions) {
-		ctx.types[0].push_back({fn->as_function.symbol, "?"});
-		ctx.types.push_back({});
+		ctx.value_types[0].push_back({fn->as_function.symbol, "fn"});
+		ctx.value_types.push_back({});
 		for (auto& [name, type] : fn->as_function.lambda->as_lambda.args) {
 			if(!type.has_value()) 
 				ctx.error("Function '" + name + "' arg '" + name + "' doesn't have a type.");
 			else
-				ctx.types[0].push_back({name, *type});
+				ctx.value_types[0].push_back({name, *type});
 		}
 		type_check(ctx, lib, fn->as_function.lambda);
-		ctx.types.pop_back();
+		ctx.value_types.pop_back();
 	}
 	return ctx.errors;
 }
@@ -1361,7 +1439,7 @@ value construct_object(eval_context& ctx, const std::string& name, std::vector<s
 						if(n == name)
 							return v;
 					}
-					assert(false); // No value given in initializer for 'name'
+					// assert(false); // No value given in initializer for 'name'
 					return value{.type = value_type::unknown};
 				};
 				for (auto& m : t->as_object_type.members) {
@@ -1826,8 +1904,9 @@ int main(int argc, const char* argv[]) {
 	std::string src_file = args[1];
 
 	// std::string fname = "example/0_fibonacci_recursive.fl";
-	std::string fname = "example/0_fibonacci_loop.fl";
+	// std::string fname = "example/0_fibonacci_loop.fl";
 	// std::string fname = "example/1_objects.fl";
+	std::string fname = "example/compiler.fl";
 	
 	auto file = read_file(fname);
 
