@@ -1,0 +1,29 @@
+enum AstType {
+    unknown,
+    number,
+    string,
+    bin_op,
+    sequence,
+    call,
+    lambda,
+    function,
+    initialize,
+    assign,
+    symbol,
+    conditional,
+    comparison,
+    object_type,
+    object_init,
+    loop
+}
+
+object AstNode {
+    type: i64
+    c: AstNode
+}
+
+fn main() -> i64 {
+    let n = AstNode { .type = 5, .c = AstNode { .type = 3 } };
+    println(n);
+    0;
+}
