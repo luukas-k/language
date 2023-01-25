@@ -26,6 +26,7 @@ enum struct ast_node_type {
 	object_type,
 	object_init,
 	loop,
+	enum_def,
 };
 
 struct ast_node;
@@ -118,6 +119,11 @@ struct object_init {
 	std::vector<std::pair<std::string, ast_node*>> initial_values;
 };
 
+struct enum_def {
+	std::string name;
+	std::vector<std::string> values;
+};
+
 struct ast_node {
 	ast_node_type type;
 
@@ -137,7 +143,18 @@ struct ast_node {
 	object_type as_object_type;
 	object_init as_object_init;
 	loop_node as_loop;
+	enum_def as_enum_def;
 };
+
+ast_node* make_enum(const std::string& name, const std::vector<std::string>& vals) {
+	return new ast_node{
+		.type = ast_node_type::enum_def,
+		.as_enum_def = {
+			.name = name,
+			.values = vals
+		}
+	};
+}
 
 ast_node* make_number(i64 v) {
 	return new ast_node{
@@ -357,7 +374,7 @@ bool parse_literal(parse_context& ctx, const std::string& v) {
 	return true;
 }
 
-std::optional<std::string> parse_symbol(parse_context& ctx);
+std::optional<std::string> parse_symbol(parse_context& ctx, bool scoped = true);
 ast_node* parse_lambda(parse_context& ctx);
 ast_node* parse_expr(parse_context& ctx);
 ast_node* parse_scope(parse_context& ctx);
@@ -498,7 +515,7 @@ ast_node* parse_div(parse_context& ctx) {
 	return make_bin_op(lhs, rhs, bin_op_type::div);
 }
 
-std::optional<std::string> parse_symbol(parse_context& ctx) {
+std::optional<std::string> parse_symbol(parse_context& ctx, bool scoped) {
 	i64 off = ctx.offset;
 
 	ignore_ws(ctx);
@@ -506,7 +523,7 @@ std::optional<std::string> parse_symbol(parse_context& ctx) {
 		std::string symbol;
 		do {
 			symbol.push_back(ctx.get());
-		} while (is_in_alphabet(ctx.peek()) || is_num(ctx.peek()));
+		} while (is_in_alphabet(ctx.peek()) || is_num(ctx.peek()) || (ctx.peek() == '_') || (scoped && (ctx.peek() == '.')));
 		return symbol;
 	}
 
@@ -908,12 +925,53 @@ ast_node* parse_if(parse_context& ctx) {
 }
 
 ast_node* parse_enum(parse_context& ctx) {
-	parse_literal(ctx, "enum");
-	parse_literal(ctx, "{");
-	do {
+	i64 off = ctx.offset;
 
+	ignore_ws(ctx);
+	if (!parse_literal(ctx, "enum")) {
+		ctx.offset = off;
+		return nullptr;
+	}
+	
+	ignore_ws(ctx);
+	auto sym = parse_symbol(ctx, false);
+	if (!sym) {
+		ctx.offset = off;
+		return nullptr;
+	}
+	
+	ignore_ws(ctx);
+	if (!parse_literal(ctx, "{")) {
+		ctx.offset = off;
+		return nullptr;
+	}
+
+	bool is_first = true;
+	std::vector<std::string> symbols;
+	do {
+		if (!is_first) {
+			ignore_ws(ctx);
+			if (!parse_literal(ctx, ",")) {
+				break;
+			}
+		}
+		is_first = false;
+		
+		ignore_ws(ctx);
+		auto s = parse_symbol(ctx, false);
+		if (!s) {
+			break;
+		}
+		symbols.push_back(*s);
 	} while (true);
-	parse_literal(ctx, "}");
+	
+	ignore_ws(ctx);
+	if (!parse_literal(ctx, "}")) {
+		ctx.offset = off;
+		return nullptr;
+	}
+
+	return make_enum(*sym, symbols);
 }
 
 ast_node* parse_statement(parse_context& ctx) {
@@ -1159,6 +1217,9 @@ library parse_library(parse_context& ctx) {
 		else if (n = parse_object_type(ctx)) {
 			object_types.push_back(n);
 		}
+		else if (n = parse_enum(ctx)) {
+			object_types.push_back(n);
+		}
 		else {
 			break;
 		}
@@ -1189,15 +1250,6 @@ struct type_context {
 };
 
 void type_check(type_context& ctx, library& lib, ast_node* node) {
-	auto get_symbol_type = [&](const std::string& name) -> std::string {
-		for (auto& t : ctx.value_types) {
-			for (auto& [n, v] : t) {
-				if(n == name)
-					return v;
-			}
-		}
-		return "";
-	};
 	auto is_type_name = [&](const std::string& name) {
 		for (auto& s : ctx.types) {
 			if (s == name)
@@ -1205,6 +1257,17 @@ void type_check(type_context& ctx, library& lib, ast_node* node) {
 		}
 		return false;
 	};
+	/*auto get_member_type = [&](const std::string& type, const std::string& member) -> std::string {
+		for (auto& [m, t] : ctx.member_types) {
+			if (m == type) {
+				for (auto& [aa, tt] : t) {
+					if(aa == member)
+						return tt;
+				}
+			}
+		}
+		return "";
+	};*/
 	auto get_member_type = [&](const std::string& type, const std::string& mem) -> std::string {
 		for (auto& [tname, tmembers] : ctx.member_types) {
 			if (tname == type) {
@@ -1216,6 +1279,25 @@ void type_check(type_context& ctx, library& lib, ast_node* node) {
 		}
 		return "";
 	};
+	std::function<std::string(const std::string&)> get_symbol_type = [&](const std::string& name) -> std::string {
+		if (name.find_first_of('.') != name.npos) {
+			std::string sub = name.substr(0, name.find_first_of('.'));
+			if (is_type_name(sub)) {
+				return get_member_type(sub, name.substr(name.find_first_of('.') + 1));
+			}
+			return get_member_type(get_symbol_type(sub), name.substr(name.find_first_of('.') + 1));
+		}
+		else{
+			for (auto& t : ctx.value_types) {
+				for (auto& [n, v] : t) {
+					if(n == name)
+						return v;
+				}
+			}
+			return "";
+		}
+	};
+	
 	switch (node->type) {
 		case ast_node_type::lambda:
 		{
@@ -1356,19 +1438,32 @@ std::vector<std::string> type_check(library& lib) {
 	};
 	ctx.value_types.push_back({});
 	for (auto& obj : lib.object_types) {
-		ctx.types.push_back(obj->as_object_type.name);
-		std::vector<std::pair<std::string, std::string>> member_types;
-		for (auto& [n, t] : obj->as_object_type.members) {
-			if (t.has_value()) {
-				if (!is_type_name(*t)) {
-					ctx.error("(Unknown type) '" + *t + "'");
+		if(obj->type == ast_node_type::object_type){
+			ctx.types.push_back(obj->as_object_type.name);
+			std::vector<std::pair<std::string, std::string>> member_types;
+			for (auto& [n, t] : obj->as_object_type.members) {
+				if (t.has_value()) {
+					if (!is_type_name(*t)) {
+						ctx.error("(Unknown type) '" + *t + "'");
+					}
+					member_types.push_back({ n, *t });
 				}
-				member_types.push_back({ n, *t });
+				else
+					ctx.error("(Object types) Object doesn't have type definition.");
 			}
-			else
-				ctx.error("(Object types) Object doesn't have type definition.");
+			ctx.member_types.push_back({ obj->as_object_type.name, member_types });
 		}
-		ctx.member_types.push_back({ obj->as_object_type.name, member_types });
+		else if (obj->type == ast_node_type::enum_def) {
+			ctx.types.push_back(obj->as_enum_def.name);
+			std::vector<std::pair<std::string, std::string>> mem_types;
+			for (auto& m : obj->as_enum_def.values) {
+				mem_types.push_back({m, obj->as_enum_def.name});
+			}
+			ctx.member_types.push_back({obj->as_enum_def.name, mem_types});
+		}
+		else {
+			assert(false);
+		}
 	}
 	for (auto& fn : lib.functions) {
 		ctx.value_types[0].push_back({fn->as_function.symbol, "fn"});
@@ -1454,17 +1549,40 @@ value construct_object(eval_context& ctx, const std::string& name, std::vector<s
 	return {};
 }
 
+value get_value(value& v, const std::string& name) {
+	std::string sub = name.substr(0, name.find_first_of('.'));
+	switch (v.type) {
+		case value_type::object:
+		{
+			for (auto& [member, val] : v.as_object->members) {
+				if (member == sub) {
+					if (name.find_first_of('.') != name.npos) {
+						return get_value(val, name.substr(name.find_first_of('.') + 1));
+					}
+					return val;
+				}
+			}
+		}
+	}
+	return v;
+}
+
 value get_value(eval_context& ctx, const std::string& name) {
+	std::string sub = name.substr(0, name.find_first_of('.'));
 	for (i64 i = 0; i < ctx.scopes.size(); i++) {
 		i64 rind = ctx.scopes.size() - 1 - i;
 		auto& s = ctx.scopes[rind];
 
 		for (auto& [n, v] : s.values) {
-			if (n == name) 
+			if (n == sub) {
+				if (name.find_first_of('.') != name.npos) {
+					return get_value(v, name.substr(name.find_first_of('.') + 1));
+				}
 				return v;
+			}
 		}
 	}
-	assert(false);
+	assert(false); // Couldn't find value (enums fail)
 	return {};
 }
 
@@ -1478,14 +1596,40 @@ std::string get_value_type(const value& v) {
 	return "???";
 }
 
+void set_value(value& target, const std::string& mem, value new_v) {
+	std::string sub = mem.substr(0, mem.find_first_of('.'));
+
+	if (target.type == value_type::object) {
+		for (auto& [n, v] : target.as_object->members) {
+			if (n == sub) {
+				if (mem.find_first_of('.') != mem.npos) {
+					set_value(v, mem.substr(mem.find_first_of('.') + 1), new_v);
+				}
+				else {
+					v = new_v;
+				}
+			}
+		}
+	}
+	else {
+		assert(false);
+	}
+}
+
 void set_value(eval_context& ctx, const std::string& name, value new_v) {
+	std::string sub = name.substr(0, name.find_first_of('.'));
 	for (i64 i = 0; i < ctx.scopes.size(); i++) {
 		i64 rind = ctx.scopes.size() - 1 - i;
 		auto& s = ctx.scopes[rind];
 
 		for (auto& [n, v] : s.values) {
-			if (n == name) {
-				v = new_v;
+			if (n == sub) {
+				if (name.find_first_of('.') != name.npos) {
+					set_value(v, name.substr(name.find_first_of('.') + 1), new_v);
+				}
+				else {
+					v = new_v;
+				}
 				return;
 			}
 		}
@@ -1852,7 +1996,29 @@ i64 evaluate(const library& lib) {
 		print(ctx, {value{.type = value_type::string, .as_string = "\n"}});
 	});
 
+	auto add_enum = [&](const enum_def& ed) {
+		value v;
+		v.type = value_type::object;
+		v.as_object = new object_data{};
+		
+		v.as_object->type_name = ed.name;
+		i64 i = 0;
+		for (auto& n : ed.values) {
+			value iv{ 
+				.type = value_type::i64, 
+				.as_i64 = i++ 
+			};
+			v.as_object->members.push_back({n, iv});
+		}
+		ctx.scopes[0].values.push_back({ed.name, v});
+	};
+
 	ctx.scopes.push_back({});
+	for (auto obj : lib.object_types) {
+		if (obj->type == ast_node_type::enum_def) {
+			add_enum(obj->as_enum_def);
+		}
+	}
 	for (auto& fn : lib.functions) {
 		evaluate(ctx, fn);
 	}
@@ -1949,7 +2115,7 @@ int main(int argc, const char* argv[]) {
 		for (auto& err : type_errors) {
 			std::cout << err << "\n";
 		}
-		return -1;
+		//return -1;
 	}
 	std::cout << "[Checked types in]: " << tc_end << "s\n";
 
